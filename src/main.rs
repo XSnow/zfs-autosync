@@ -1,43 +1,6 @@
 use std::env;
 use std::process::Command;
 
-trait ZfsThing {
-    fn typestr(&self) -> &str;
-
-    fn list(&self, filesystem: &str)  -> Result<Vec<String>, String> {
-        let v = call_cmd("zfs", &["list", "-t", self.typestr(), "-H", "-o", "name",
-                                  "-p", "-S", "creation", filesystem]) ? ;
-
-        Ok(v.lines().map(str::to_string).collect())
-    }
-}
-
-struct Filesystem { name: &'static str }
-struct Bookmark   { name: &'static str }
-struct Snapshot   { name: &'static str }
-
-
-impl ZfsThing for Filesystem {
-    fn typestr(&self) -> &str {
-        "filesystem";
-    }
-}
-impl ZfsThing for Bookmark {
-    fn typestr(&self) -> &str {
-        "bookmark";
-    }
-}
-impl ZfsThing for Snapshot {
-    fn typestr(&self) -> &str {
-        "snapshot";
-    }
-}
-
-enum ZfsType {
-    Filesystem,
-    Bookmark,
-    Snapshot
-}
 
 fn call_cmd(cmd_exec: &str, cmd_line: &[&str]) -> Result<String, String> {
     println!("Calling {} with {:?}", cmd_exec, cmd_line);
@@ -56,61 +19,84 @@ fn call_cmd(cmd_exec: &str, cmd_line: &[&str]) -> Result<String, String> {
     return ret;
 }
 
-fn destroy_bookmark(filesystem: &str, bookmark: &str)
-                    -> Result<String, String> {
+trait ZfsThing {
+    const TYPE_STR: &'static str;
+    fn fromfs(fsname: &str, name: &str) -> Self;
+    fn name(&self) -> &str;
+    fn fsname(&self) -> &str;
+    fn list<T: ZfsThing>(&self)  -> Result<Vec<T>, String> {
+        let v = call_cmd("zfs", &["list", "-t", T::TYPE_STR, "-H", "-o", "name",
+                                  "-p", "-S", "creation", self.name()])?;
 
-    let full_bookmark = &format!("{}#{}", filesystem, bookmark);
-
-    call_cmd("zfs", &["destroy", full_bookmark])
+        Ok(v.lines().map(|v| T::fromfs(self.fsname(), v)).collect())
+    }
+    fn destroy(&self) -> Result<(), String> {
+        call_cmd("zfs", &["destroy", self.name()])?;
+        Ok(())
+    }
 }
 
-fn create_bookmark(filesystem: &str, snapshot: &str, bookmark: &str)
-                   -> Result<String, String> {
+struct Filesystem { name: String }
+struct Bookmark   { fsname: String, name: String }
+struct Snapshot   { fsname: String, name: String }
 
-    let full_bookmark = &format!("{}#{}", filesystem, bookmark);
-
-    call_cmd("zfs", &["bookmark", snapshot, full_bookmark])
+impl Filesystem {
+    fn from_str(name: &str) -> Self { Filesystem { name: name.to_string() } }
+}
+impl ZfsThing for Filesystem {
+    const TYPE_STR: &'static str = "filesystem";
+    fn fromfs(fsname: &str, name: &str) -> Self {
+        assert_eq!(fsname, name);
+        Filesystem::from_str(name)
+    }
+    fn name(&self) -> &str { &self.name }
+    fn fsname(&self) -> &str { &self.name }
+}
+impl ZfsThing for Bookmark {
+    const TYPE_STR: &'static str = "bookmark";
+    fn fromfs(fsname: &str, name: &str) -> Self {
+        Bookmark{ fsname: fsname.to_string(), name: name.to_string() }
+    }
+    fn name(&self) -> &str { &self.name }
+    fn fsname(&self) -> &str { &self.fsname }
+}
+impl ZfsThing for Snapshot {
+    const TYPE_STR: &'static str = "snapshot";
+    fn fromfs(fsname: &str, name: &str) -> Self {
+        Snapshot { fsname: fsname.to_string(), name: name.to_string() }
+    }
+    fn name(&self) -> &str { &self.name }
+    fn fsname(&self) -> &str { &self.fsname }
+}
+impl Snapshot {
+    fn bookmark(&self, bookmark: &str) -> Result<(), String> {
+        let full_bookmark = &format!("{}#{}", self.fsname(), bookmark);
+        call_cmd("zfs", &["bookmark", self.name(), full_bookmark])?;
+        Ok(())
+    }
 }
 
-fn zfs_list<T> (filesystem: &str) -> Result<Vec<String>, String> {
-
-    let typestr = match T {
-        _ => "test",
-        // ZfsType::Filesystem => "filesystem",
-        // ZfsType::Bookmark => "bookmark",
-        // ZfsType::Snapshot => "snapshot",
-    };
-    let v = call_cmd("zfs", &["list", "-t", typestr, "-H", "-o", "name",
-                              "-p", "-S", "creation", filesystem]) ? ;
-
-    Ok(v.lines().map(str::to_string).collect())
-}
 
 fn main() {
 
     // read path from cmd arguments
     let args: Vec<String> = env::args().collect();
 
-    let source = &args[1];
-    let dest = &args[2];
+    let source = Filesystem::from_str(&args[1]);
+    let dest = Filesystem::from_str(&args[2]);
 
-    println!("Backup from {} to {}", source, dest);
+    println!("Backup from {} to {}", source.name, dest.name());
 
-    // find datasets
-    // for each datasets, decide whether should initialize a copy
-
-    // zfs list -t filesystem -H -o name
-
-    // return 1
-    if let [ret] = &zfs_list(ZfsType::Filesystem, source).unwrap()[..] {
-        assert_eq!(ret, source);
-    }else {
-        panic!("WTF!");
+    match &source.list::<Filesystem>().unwrap()[..] {
+        [_] =>(), _ => panic!("WTF! IMPOSSIBLE!"),
     }
 
-    let snapshots = zfs_list(ZfsType::Snapshot, source).unwrap();
-    println!("Latest Snapshot is {}", snapshots[0]);
+    let snapshots: Vec<Snapshot> = source.list().unwrap();
+    println!("Latest Snapshot is {} of {}",
+             snapshots[0].name, snapshots[0].fsname);
 
+    let bookmarks: Vec<Bookmark> = source.list().unwrap();
+    // println!("Bookmarks {?:}", )
     //destroy_bookmark(source, "latest_new");
     //create_bookmark(source, latest_snapshot, "latest_new");
 
